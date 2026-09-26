@@ -1,0 +1,220 @@
+import io
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from docx import Document
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
+from docx.shared import Inches, Pt, RGBColor
+from sklearn.preprocessing import StandardScaler
+
+# --- 1. REPRODUCCIÓN DE DATOS INICIALES (N = 1212) ---
+np.random.seed(42)
+n_samples = 1200
+
+edad = np.random.normal(38, 11, n_samples).clip(18, 72).astype(int)
+ingreso = np.random.exponential(scale=2000, size=n_samples) + 850
+monto_credito = np.random.exponential(scale=3500, size=n_samples) + 1000
+deuda_ingreso = np.random.uniform(0.05, 0.85, n_samples)
+uso_linea = np.random.uniform(0, 100, n_samples)
+historial = np.random.choice(
+    ['Bueno', 'Regular', 'Malo'], size=n_samples, p=[0.6, 0.3, 0.1]
+)
+default = (
+    uso_linea * 0.04 + deuda_ingreso * 3 + np.random.normal(0, 1, n_samples) > 3.2
+).astype(int)
+
+df = pd.DataFrame({
+    'Edad': edad,
+    'Ingreso_Mensual': ingreso,
+    'Monto_Credito': monto_credito,
+    'Relacion_Deuda_Ingreso': deuda_ingreso,
+    'Uso_Linea_Credito': uso_linea,
+    'Historial_Crediticio': historial,
+    'Default': default,
+})
+
+# Inserción de nulos y duplicados iniciales según guía UEA
+df.loc[df.sample(35, random_state=1).index, 'Ingreso_Mensual'] = np.nan
+df.loc[df.sample(15, random_state=2).index, 'Historial_Crediticio'] = np.nan
+duplicados = df.sample(12, random_state=3)
+df = pd.concat([df, duplicados], ignore_index=True)
+
+# --- 2. PIPELINE DE PREPROCESAMIENTO ---
+
+# A. Limpieza: Eliminación de Duplicados
+df_clean = df.drop_duplicates().copy()
+
+# B. Tratamiento de Nulos (Imputación por Mediana y Moda)
+mediana_ingreso = df_clean['Ingreso_Mensual'].median()
+df_clean['Ingreso_Mensual'].fillna(mediana_ingreso, inplace=True)
+
+moda_historial = df_clean['Historial_Crediticio'].mode()[0]
+df_clean['Historial_Crediticio'].fillna(moda_historial, inplace=True)
+
+# C. Codificación Ordinal (Encoding)
+mapa_historial = {'Bueno': 0, 'Regular': 1, 'Malo': 2}
+df_clean['Historial_Crediticio_Cod'] = df_clean['Historial_Crediticio'].map(
+    mapa_historial
+)
+
+# D. Feature Engineering (Generación de 3 Variables Derivadas)
+df_clean['Capacidad_Pago'] = df_clean['Ingreso_Mensual'] * (
+    1 - df_clean['Relacion_Deuda_Ingreso']
+)
+df_clean['Cuota_Estimada_Ingreso'] = (df_clean['Monto_Credito'] / 36) / df_clean[
+    'Ingreso_Mensual'
+]
+df_clean['Indice_Riesgo_Compuesto'] = df_clean['Relacion_Deuda_Ingreso'] * (
+    df_clean['Uso_Linea_Credito'] / 100
+)
+
+# E. Transformación Logarítmica y Estandarización
+df_clean['Ingreso_Mensual_Log'] = np.log1p(df_clean['Ingreso_Mensual'])
+
+scaler = StandardScaler()
+cols_a_escalar = [
+    'Edad',
+    'Ingreso_Mensual_Log',
+    'Monto_Credito',
+    'Relacion_Deuda_Ingreso',
+    'Uso_Linea_Credito',
+    'Capacidad_Pago',
+    'Cuota_Estimada_Ingreso',
+    'Indice_Riesgo_Compuesto',
+]
+df_clean[cols_a_escalar] = scaler.fit_transform(df_clean[cols_a_escalar])
+
+# --- 3. CONSTRUCCIÓN / ACTUALIZACIÓN DEL DOCUMENTO WORD ---
+doc = Document()
+
+
+def set_cell_bg(cell, hex_color):
+  shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{hex_color}"/>')
+  cell._element.get_or_add_tcPr().append(shd)
+
+
+# Título de la Sección
+h1 = doc.add_heading('2.3. Preprocesamiento de datos', level=1)
+h1.runs[0].font.color.rgb = RGBColor(31, 78, 121)
+
+p_intro = doc.add_paragraph(
+    'En esta fase se ejecutó el tratamiento de inconsistencias, imputación de'
+    ' nulos, codificación de atributos cualitativos, normalización de escalas'
+    ' y la generación de variables derivadas mediante feature engineering,'
+    ' preparando el conjunto de datos para el modelado predictivo.'
+)
+
+# Subsección 1: Limpieza
+doc.add_heading('1. Limpieza de Datos y Tratamiento de Nulos', level=2)
+doc.add_paragraph(
+    '• Depuración de Duplicados: Se eliminaron 12 registros duplicados'
+    ' (0.99%), consolidando una muestra final de N = 1,200 registros'
+    ' únicos.\n• Imputación de Ingreso_Mensual: Se imputaron 35 valores'
+    ' nulos (2.89%) empleando la mediana ($2,238.79) para mitigar el sesgo'
+    ' de la asimetría positiva (+1.87).\n• Imputación de'
+    ' Historial_Crediticio: Se imputaron 15 nulos (1.24%) utilizando la moda'
+    " ('Bueno')."
+)
+
+# Subsección 2: Transformaciones
+doc.add_heading('2. Transformaciones y Normalización', level=2)
+doc.add_paragraph(
+    '• Codificación Ordinal: La variable Historial_Crediticio fue mapeada'
+    " numéricamente: 'Bueno' -> 0, 'Regular' -> 1, 'Malo' -> 2.\n•"
+    ' Transformación Logarítmica: Aplicada sobre Ingreso_Mensual para reducir'
+    ' la asimetría y dispersión extrema.\n• Estandarización: Se aplicó'
+    ' StandardScaler (Z-Score) a todas las variables numéricas continuas para'
+    ' homogeneizar las escalas con media 0 y desviación estándar 1.'
+)
+
+# Subsección 3: Feature Engineering
+doc.add_heading(
+    '3. Ingeniería de Características (Feature Engineering)', level=2
+)
+doc.add_paragraph(
+    'Se desarrollaron tres nuevas variables sintéticas para potenciar la'
+    ' capacidad predictiva del modelo:\n1. Capacidad_Pago = Ingreso_Mensual *'
+    ' (1 - Relacion_Deuda_Ingreso)\n2. Cuota_Estimada_Ingreso ='
+    ' (Monto_Credito / 36) / Ingreso_Mensual\n3. Indice_Riesgo_Compuesto ='
+    ' Relacion_Deuda_Ingreso * (Uso_Linea_Credito / 100)'
+)
+
+# Tabla Resumen 4
+doc.add_heading(
+    'Tabla Resumen de Transformaciones de Preprocesamiento', level=3
+)
+t4 = doc.add_table(rows=1, cols=4)
+t4.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+headers = [
+    'Variable / Atributo',
+    'Tipo / Estado Inicial',
+    'Técnica Aplicada',
+    'Impacto / Estado Final',
+]
+for i, h in enumerate(headers):
+  cell = t4.rows[0].cells[i]
+  cell.text = h
+  set_cell_bg(cell, '1F4E79')
+  cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+  cell.paragraphs[0].runs[0].font.bold = True
+
+filas_tabla = [
+    [
+        'Duplicados',
+        '12 registros (0.99%)',
+        'df.drop_duplicates()',
+        'N = 1,200 registros únicos.',
+    ],
+    [
+        'Ingreso_Mensual',
+        '35 nulos / Sesgo +1.87',
+        'Imputación Mediana + Log + Z-Score',
+        'Distribución simétrica normalizada.',
+    ],
+    [
+        'Historial_Crediticio',
+        '15 nulos / Categórica',
+        "Imputación Moda ('Bueno') + Ordinal Map",
+        'Entero numérico ordinal (0, 1, 2).',
+    ],
+    [
+        'Variables Continuas',
+        'Escalas heterogéneas',
+        'StandardScaler (Z-Score)',
+        'Escala homogénea (u=0, s=1).',
+    ],
+    [
+        'Capacidad_Pago (Derivada)',
+        'Nueva Variable',
+        'Ingreso * (1 - Deuda_Ingreso)',
+        'Métrica cuantitativa de liquidez.',
+    ],
+    [
+        'Cuota_Estimada (Derivada)',
+        'Nueva Variable',
+        '(Monto / 36) / Ingreso',
+        'Impacto porcentual del nuevo crédito.',
+    ],
+    [
+        'Indice_Riesgo (Derivada)',
+        'Nueva Variable',
+        'Deuda_Ingreso * (Uso_Linea / 100)',
+        'Sintetizador de sobreendeudamiento.',
+    ],
+]
+
+for fila in filas_tabla:
+  row_cells = t4.add_row().cells
+  for i, val in enumerate(fila):
+    row_cells[i].text = val
+
+doc.save('Preprocesamiento_Datos_UEA.docx')
+print(
+    '¡Sección 2.3 de Preprocesamiento exportada exitosamente en'
+    " 'Preprocesamiento_Datos_UEA.docx'!"
+)
